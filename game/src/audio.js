@@ -78,6 +78,8 @@ export class Sound {
     this._noise(0.2, 0.25, 800);
   }
   dash() { this._noise(0.16, 0.16, 2600); this._tone(300, 900, 0.14, 'sine', 0.08); }
+  lancerWarn() { this._tone(520, 1180, 0.32, 'sawtooth', 0.07); }
+  lancerCharge() { this._noise(0.3, 0.2, 3200); this._tone(1180, 240, 0.28, 'sawtooth', 0.1); }
   pickup() { this._tone(660, 990, 0.09, 'sine', 0.16); this._tone(990, 1320, 0.1, 'sine', 0.12, 0.06); }
   powerup() { [523, 659, 784, 1046].forEach((f, i) => this._tone(f, f, 0.12, 'triangle', 0.14, i * 0.07)); }
   waveClear() { [392, 523, 659].forEach((f, i) => this._tone(f, f, 0.16, 'triangle', 0.13, i * 0.09)); }

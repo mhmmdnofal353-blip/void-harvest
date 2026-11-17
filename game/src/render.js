@@ -3,18 +3,44 @@
 // drawn as distinct silhouettes (dart, diamond, hexagon, sun) so a kind can be told
 // at a glance in the middle of a fight.
 
-import { FIELD, PLAYER, PALETTE, FONT, BOSS } from './config.js';
+import { FIELD, PLAYER, PALETTE, FONT, BOSS, HUNTERS } from './config.js';
 import { makeRandom } from './random.js';
 
 // A fixed starfield, the same for every player: three depths for parallax drift.
 const STARS = (() => {
   const next = makeRandom(20261115);
   const stars = [];
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 170; i++) {
     stars.push({ x: next() * FIELD.width, y: next() * FIELD.height, z: 0.25 + next() * 0.75, r: 0.6 + next() * 1.5 });
   }
   return stars;
 })();
+
+// Nebula clouds: big soft colour washes seeded once, drifting almost imperceptibly,
+// so the arena reads as deep space rather than a black box. Each is drawn as a radial
+// gradient in its own hue; together they tint the whole field.
+const NEBULAE = (() => {
+  const next = makeRandom(977351);
+  const hues = [
+    [70, 48, 150],   // violet
+    [16, 96, 118],   // deep teal
+    [148, 62, 34],   // ember
+    [104, 34, 104],  // magenta dusk
+    [30, 60, 140],   // royal blue
+    [120, 40, 70],   // wine
+  ];
+  const clouds = [];
+  for (let i = 0; i < 7; i++) {
+    clouds.push({
+      x: next() * FIELD.width, y: next() * FIELD.height,
+      r: 250 + next() * 260, hue: hues[i % hues.length],
+      phase: next() * Math.PI * 2, drift: 10 + next() * 16,
+    });
+  }
+  return clouds;
+})();
+
+
 
 function polygon(ctx, points) {
   ctx.beginPath();
@@ -50,6 +76,20 @@ export class Renderer {
     this._texts(world);
     ctx.restore();
 
+    // A permanent vignette settles the corners; a red one blooms when the hull is hit.
+    const vg = ctx.createRadialGradient(FIELD.width / 2, FIELD.height / 2, FIELD.height * 0.42, FIELD.width / 2, FIELD.height / 2, FIELD.height * 0.98);
+    vg.addColorStop(0, 'rgba(2,3,8,0)');
+    vg.addColorStop(1, 'rgba(2,3,8,0.44)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
+    if (world.hurtFlash > 0) {
+      const hg = ctx.createRadialGradient(FIELD.width / 2, FIELD.height / 2, FIELD.height * 0.3, FIELD.width / 2, FIELD.height / 2, FIELD.height * 0.92);
+      hg.addColorStop(0, 'rgba(255,40,50,0)');
+      hg.addColorStop(1, `rgba(255,40,50,${world.hurtFlash * 0.5})`);
+      ctx.fillStyle = hg;
+      ctx.fillRect(0, 0, FIELD.width, FIELD.height);
+    }
+
     if (world.flash > 0) {
       ctx.fillStyle = `rgba(255, 240, 200, ${world.flash * 0.5})`;
       ctx.fillRect(0, 0, FIELD.width, FIELD.height);
@@ -70,6 +110,19 @@ export class Renderer {
     ctx.fillStyle = g;
     ctx.fillRect(-20, -20, FIELD.width + 40, FIELD.height + 40);
 
+    // Nebula washes, breathing slowly against the base gradient.
+    for (const n of NEBULAE) {
+      const nx = n.x + Math.sin(time * 0.045 + n.phase) * n.drift;
+      const ny = n.y + Math.cos(time * 0.037 + n.phase * 1.7) * n.drift * 0.6;
+      const [r, gg, b] = n.hue;
+      const grad = ctx.createRadialGradient(nx, ny, 0, nx, ny, n.r);
+      grad.addColorStop(0, `rgba(${r},${gg},${b},0.20)`);
+      grad.addColorStop(0.6, `rgba(${r},${gg},${b},0.08)`);
+      grad.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(nx - n.r, ny - n.r, n.r * 2, n.r * 2);
+    }
+
     ctx.strokeStyle = PALETTE.grid;
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.35;
@@ -79,11 +132,20 @@ export class Renderer {
     ctx.stroke();
     ctx.globalAlpha = 1;
 
+    // Stars drift with depth — the far ones crawl, the near ones slide — and the
+    // brightest few wear a cross sparkle.
     for (const s of STARS) {
+      const sx = (s.x + time * 7 * s.z * s.z) % FIELD.width;
       const tw = 0.55 + 0.45 * Math.sin(time * (0.6 + s.z) + s.x);
       ctx.globalAlpha = 0.35 + 0.5 * s.z * tw;
       ctx.fillStyle = '#cfe6ff';
-      ctx.fillRect(s.x, s.y, s.r, s.r);
+      ctx.fillRect(sx, s.y, s.r, s.r);
+      if (s.r > 1.72) {
+        const L = s.r * 4.2;
+        ctx.globalAlpha *= 0.55;
+        ctx.fillRect(sx + s.r / 2 - L / 2, s.y + s.r / 2 - 0.6, L, 1.2);
+        ctx.fillRect(sx + s.r / 2 - 0.6, s.y + s.r / 2 - L / 2, 1.2, L);
+      }
     }
     ctx.globalAlpha = 1;
   }
@@ -132,9 +194,43 @@ export class Renderer {
 
   _enemy(e, time) {
     const { ctx } = this;
+    // A lancer mid-telegraph paints its charge line on the arena first, under
+    // everything else aboard: the warning is part of the game, so it must read.
+    if (e.kind === 'lancer' && e.state === 'telegraph') {
+      const spec = HUNTERS.lancer;
+      const len = spec.chargeSpeed * spec.chargeTime;
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.rotate(e.aimAngle);
+      ctx.globalAlpha = 0.35 + 0.3 * Math.sin(time * 26);
+      ctx.strokeStyle = PALETTE.lancer;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([9, 11]);
+      ctx.beginPath();
+      ctx.moveTo(e.radius, 0);
+      ctx.lineTo(len, 0);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(len, -7);
+      ctx.lineTo(len + 12, 0);
+      ctx.lineTo(len, 7);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.save();
     ctx.translate(e.x, e.y);
     const flash = e.hitT > 0;
+    // A soft halo in the kind's own colour, so every hunter glows against the dark.
+    // The boss wears a wide pulsing corona instead — it should loom before it is read.
+    const HALO_RGB = { mite: '255,180,84', weaver: '199,146,255', bulwark: '255,92,122', lancer: '182,255,94', boss: '255,215,92' };
+    const haloR = e.radius * (e.kind === 'boss' ? 2.5 + 0.18 * Math.sin(time * 2.4) : 2.1);
+    const halo = ctx.createRadialGradient(0, 0, e.radius * 0.4, 0, 0, haloR);
+    halo.addColorStop(0, `rgba(${HALO_RGB[e.kind]},${e.kind === 'boss' ? 0.30 : 0.20})`);
+    halo.addColorStop(1, `rgba(${HALO_RGB[e.kind]},0)`);
+    ctx.fillStyle = halo;
+    ctx.fillRect(-haloR, -haloR, haloR * 2, haloR * 2);
     if (e.kind === 'mite') {
       ctx.rotate(e.angle + Math.PI / 2 + Math.sin(time * 6 + e.weavePhase) * 0.2);
       polygon(ctx, [[0, -14], [11, 10], [0, 5], [-11, 10]]);
@@ -184,10 +280,49 @@ export class Renderer {
       ctx.stroke();
       ctx.restore();
       return;
+    } else if (e.kind === 'lancer') {
+      // A long spear of a ship. While it telegraphs it strobes white-hot; while it
+      // charges it drags speed lines behind the point.
+      ctx.rotate(e.angle);
+      if (e.state === 'charge') {
+        ctx.strokeStyle = 'rgba(182,255,94,0.5)';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (const off of [-9, 0, 9]) {
+          ctx.moveTo(-16, off);
+          ctx.lineTo(-16 - 34 - Math.abs(off) * 2, off);
+        }
+        ctx.stroke();
+      }
+      const strobing = e.state === 'telegraph' && Math.floor(time * 11) % 2 === 0;
+      polygon(ctx, [[26, 0], [-6, -7], [-17, -11], [-12, 0], [-17, 11], [-6, 7]]);
+      ctx.fillStyle = flash || strobing ? '#ffffff' : PALETTE.lancer;
+      ctx.fill();
+      ctx.strokeStyle = '#2c4a08';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(2, 0, 3.6, 0, Math.PI * 2);
+      ctx.fillStyle = strobing ? '#ff5c3a' : '#f4ffd6';
+      ctx.fill();
     } else if (e.kind === 'boss') {
       const rot = e.angle;
+      const enraged = e.hp < e.maxHp * 0.3;
+      const rayColor = flash ? '#ffffff' : enraged ? '#ff8a5c' : PALETTE.boss;
+      // An outer ring of long thin rays turning against the inner crown.
+      ctx.strokeStyle = rayColor;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = -rot * 0.6 + (i / 8) * Math.PI * 2;
+        ctx.moveTo(Math.cos(a) * (e.radius * 1.3), Math.sin(a) * (e.radius * 1.3));
+        ctx.lineTo(Math.cos(a) * (e.radius * 1.62), Math.sin(a) * (e.radius * 1.62));
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
       // Rotating rays.
-      ctx.strokeStyle = flash ? '#ffffff' : PALETTE.boss;
+      ctx.strokeStyle = rayColor;
       ctx.lineWidth = 5;
       ctx.beginPath();
       for (let i = 0; i < 12; i++) {
@@ -214,12 +349,25 @@ export class Renderer {
 
   _bullets(world) {
     const { ctx } = this;
+    // Player bolts are tracer rounds: a short glowing streak along the flight path
+    // with a white-hot head, drawn additively so a stream of them reads as light.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(88,240,214,0.55)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    for (const b of world.bullets) {
+      ctx.moveTo(b.x - b.vx * 0.028, b.y - b.vy * 0.028);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
     ctx.fillStyle = PALETTE.bullet;
     for (const b of world.bullets) {
       ctx.beginPath();
       ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.restore();
     for (const b of world.ebullets) {
       const g = ctx.createRadialGradient(b.x, b.y, 0.5, b.x, b.y, b.radius * 2.1);
       g.addColorStop(0, '#ffd9cf');
@@ -248,6 +396,18 @@ export class Renderer {
         ctx.fillStyle = PALETTE.repair;
         ctx.fillRect(-3.4, -11, 6.8, 22);
         ctx.fillRect(-11, -3.4, 22, 6.8);
+      } else if (pk.kind === 'scatter') {
+        ctx.beginPath();
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+        ctx.strokeStyle = PALETTE.scatter;
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+        ctx.fillStyle = PALETTE.scatter;
+        for (const [dx, dy] of [[0, -4.6], [-4.4, 3.4], [4.4, 3.4]]) {
+          ctx.beginPath();
+          ctx.arc(dx, dy, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
       } else {
         ctx.beginPath();
         ctx.arc(0, 0, 10, 0, Math.PI * 2);
@@ -264,11 +424,16 @@ export class Renderer {
 
   _particles(world) {
     const { ctx } = this;
+    // Additive sparks: overlapping debris brightens toward white at the heart of an
+    // explosion instead of muddying, which is what makes a kill feel like a burst.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
     for (const pt of world.particles) {
       ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
       ctx.fillStyle = pt.color;
       ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
     }
+    ctx.restore();
     ctx.globalAlpha = 1;
   }
 
@@ -321,23 +486,31 @@ export class Renderer {
     ctx.fillStyle = PALETTE.muted;
     ctx.fillText(`${world.kills} kills`, FIELD.width - 22, 72);
 
-    // Hull, bottom left.
+    // Hull, bottom left. Under a third it stops being a gauge and becomes an alarm.
     ctx.textAlign = 'left';
     ctx.font = `600 12px ${FONT}`;
-    ctx.fillStyle = PALETTE.muted;
-    ctx.fillText('HULL', 22, FIELD.height - 34);
+    const hullLow = p.hp <= 30;
+    ctx.fillStyle = hullLow && Math.floor(world.time * 3) % 2 === 0 ? PALETTE.danger : PALETTE.muted;
+    ctx.fillText(hullLow ? 'HULL — CRITICAL' : 'HULL', 22, FIELD.height - 34);
     bar(ctx, 22, FIELD.height - 28, 210, 11, p.hp / PLAYER.hp, p.hp > 30 ? '#6dffa8' : PALETTE.danger);
 
-    // Dash and overdrive, bottom right.
+    // Dash and weapon timers, bottom right.
     ctx.textAlign = 'right';
     ctx.font = `600 12px ${FONT}`;
     ctx.fillStyle = PALETTE.muted;
     ctx.fillText('DASH', FIELD.width - 22, FIELD.height - 34);
     bar(ctx, FIELD.width - 142, FIELD.height - 28, 120, 11, 1 - Math.max(0, p.dashCd) / 1.6, '#57f7d6');
+    let timerY = FIELD.height - 52;
     if (p.overdriveT > 0) {
       ctx.fillStyle = PALETTE.overdrive;
       ctx.font = `700 14px ${FONT}`;
-      ctx.fillText(`OVERDRIVE ${p.overdriveT.toFixed(1)}s`, FIELD.width - 22, FIELD.height - 52);
+      ctx.fillText(`OVERDRIVE ${p.overdriveT.toFixed(1)}s`, FIELD.width - 22, timerY);
+      timerY -= 20;
+    }
+    if (p.scatterT > 0) {
+      ctx.fillStyle = PALETTE.scatter;
+      ctx.font = `700 14px ${FONT}`;
+      ctx.fillText(`SCATTER ${p.scatterT.toFixed(1)}s`, FIELD.width - 22, timerY);
     }
     if (view.muted) {
       ctx.fillStyle = PALETTE.muted;
@@ -345,12 +518,21 @@ export class Renderer {
       ctx.fillText('MUTED (M)', FIELD.width - 22, 92);
     }
 
-    // Wave banner.
+    // Wave banner, on a dark band so it reads over the brightest fight.
     if (world.waveBannerT > 0) {
-      ctx.globalAlpha = Math.min(1, world.waveBannerT);
+      const a = Math.min(1, world.waveBannerT);
+      ctx.globalAlpha = a;
       ctx.textAlign = 'center';
-      ctx.fillStyle = PALETTE.text;
       ctx.font = `800 44px ${FONT}`;
+      const w = ctx.measureText(world.waveBanner).width + 72;
+      ctx.fillStyle = 'rgba(6, 10, 22, 0.62)';
+      ctx.beginPath();
+      ctx.roundRect(FIELD.width / 2 - w / 2, 158, w, 74, 12);
+      ctx.fill();
+      ctx.strokeStyle = world.boss ? PALETTE.boss : 'rgba(120,160,255,0.35)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = world.boss ? PALETTE.boss : PALETTE.text;
       ctx.fillText(world.waveBanner, FIELD.width / 2, 210);
       ctx.globalAlpha = 1;
     }
@@ -386,8 +568,8 @@ export class Renderer {
       'WASD or arrows to fly — mouse to aim, hold to fire',
       'SHIFT or SPACE to dash through danger',
       'Chain kills to raise your combo multiplier; getting hit breaks it',
-      'Grab green crosses to repair, blue cells for OVERDRIVE',
-      'Every 5th wave, the Hollow Sun comes for you',
+      'Grab green crosses to repair, blue cells for OVERDRIVE, pink cells for SCATTER',
+      'Lancers flash a line, then charge — sidestep it. Every 5th wave: the Hollow Sun',
     ];
     lines.forEach((line, i) => ctx.fillText(line, FIELD.width / 2, 486 + i * 25));
 

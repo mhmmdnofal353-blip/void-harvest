@@ -34,7 +34,7 @@ export class World {
     this.player = {
       x: FIELD.width / 2, y: FIELD.height / 2, vx: 0, vy: 0,
       hp: PLAYER.hp, angle: -Math.PI / 2, fireT: 0, dashT: 0, dashCd: 0,
-      invulnT: 0, overdriveT: 0, alive: true, thrust: 0,
+      invulnT: 0, overdriveT: 0, scatterT: 0, alive: true, thrust: 0,
     };
     this.bullets = [];
     this.ebullets = [];
@@ -52,6 +52,7 @@ export class World {
     this.boss = null;
     this.shake = 0;
     this.flash = 0;
+    this.hurtFlash = 0;
     this.waveBanner = '';
     this.waveBannerT = 0;
     this.kills = 0;
@@ -74,6 +75,8 @@ export class World {
       kind, x, y, vx: 0, vy: 0, hp: spec.hp, maxHp: spec.hp,
       radius: spec.radius, angle: this.rng() * TAU, fireT: range(this.rng, 0.8, 1.6),
       weavePhase: this.rng() * TAU, hitT: 0, age: 0,
+      // Lancer charge state machine: stalk -> telegraph -> charge -> recover.
+      state: 'stalk', stateT: range(this.rng, 0.5, 1.4), chargeDx: 0, chargeDy: 0, aimAngle: 0,
     };
     this.enemies.push(e);
     return e;
@@ -83,7 +86,8 @@ export class World {
     const e = {
       kind: 'boss', x: FIELD.width / 2, y: -BOSS.radius - 10, vx: 0, vy: 0,
       hp: BOSS.hp, maxHp: BOSS.hp, radius: BOSS.radius, angle: 0,
-      fireT: 1.2, aimedT: 1.8, summonT: 4, hitT: 0, age: 0, entered: false,
+      fireT: 1.2, aimedT: 1.8, summonT: 4, spiralT: 0, spiralAngle: 0,
+      hitT: 0, age: 0, entered: false,
     };
     this.enemies.push(e);
     this.boss = e;
@@ -110,8 +114,10 @@ export class World {
     const r = this.rng();
     const weaverShare = this.wave >= 2 ? Math.min(0.32, 0.12 + this.wave * 0.02) : 0;
     const bulwarkShare = this.wave >= 3 ? Math.min(0.2, 0.05 + this.wave * 0.012) : 0;
+    const lancerShare = this.wave >= 4 ? Math.min(0.16, 0.04 + this.wave * 0.01) : 0;
     if (r < bulwarkShare) return 'bulwark';
-    if (r < bulwarkShare + weaverShare) return 'weaver';
+    if (r < bulwarkShare + lancerShare) return 'lancer';
+    if (r < bulwarkShare + lancerShare + weaverShare) return 'weaver';
     return 'mite';
   }
 
@@ -140,6 +146,8 @@ export class World {
       this.pickups.push({ kind: 'repair', x, y, vx: range(this.rng, -30, 30), vy: range(this.rng, -30, 30), age: 0 });
     } else if (roll < PICKUPS.repair.chance + PICKUPS.overdrive.chance) {
       this.pickups.push({ kind: 'overdrive', x, y, vx: range(this.rng, -30, 30), vy: range(this.rng, -30, 30), age: 0 });
+    } else if (roll < PICKUPS.repair.chance + PICKUPS.overdrive.chance + PICKUPS.scatter.chance) {
+      this.pickups.push({ kind: 'scatter', x, y, vx: range(this.rng, -30, 30), vy: range(this.rng, -30, 30), age: 0 });
     }
   }
 
@@ -153,7 +161,7 @@ export class World {
     const gained = spec.score * this.multiplier() + this.comboLinks * COMBO.perLink;
     this.score += gained;
     this._text(e.x, e.y - e.radius, `+${gained}`, '#ffe066');
-    this._burst(e.x, e.y, e.kind === 'mite' ? '#ffb454' : e.kind === 'weaver' ? '#c792ff' : e.kind === 'boss' ? '#ffd75c' : '#ff5c7a',
+    this._burst(e.x, e.y, e.kind === 'mite' ? '#ffb454' : e.kind === 'weaver' ? '#c792ff' : e.kind === 'lancer' ? '#b6ff5e' : e.kind === 'boss' ? '#ffd75c' : '#ff5c7a',
       e.kind === 'boss' ? 90 : e.kind === 'bulwark' ? 34 : 16, e.kind === 'boss' ? 460 : 320, 0.7, 4);
     this.shake = Math.min(14, this.shake + (e.kind === 'boss' ? 14 : e.kind === 'bulwark' ? 7 : 3));
     if (sound) sound.explosion(e.kind === 'boss' || e.kind === 'bulwark');
@@ -184,7 +192,7 @@ export class World {
     this.comboLinks = 0;
     this.comboT = 0;
     this.shake = Math.min(16, this.shake + 8);
-    this.flash = 0.3;
+    this.hurtFlash = 0.55;
     this._burst(p.x, p.y, '#ff5c7a', 18, 300, 0.5, 3.5);
     if (sound) sound.playerHurt();
     if (p.hp <= 0) {
@@ -202,6 +210,7 @@ export class World {
     this.time += dt;
     if (this.waveBannerT > 0) this.waveBannerT -= dt;
     if (this.flash > 0) this.flash = Math.max(0, this.flash - dt * 1.8);
+    if (this.hurtFlash > 0) this.hurtFlash = Math.max(0, this.hurtFlash - dt * 1.5);
     this.shake = Math.max(0, this.shake - dt * 30);
 
     this._updateParticles(dt);
@@ -250,6 +259,7 @@ export class World {
     if (p.dashCd > 0) p.dashCd -= dt;
     if (p.invulnT > 0) p.invulnT -= dt;
     if (p.overdriveT > 0) p.overdriveT -= dt;
+    if (p.scatterT > 0) p.scatterT -= dt;
 
     // Dash: a short burst in the movement direction (or the aim, standing still).
     if ((input.wasPressed('ShiftLeft') || input.wasPressed('ShiftRight') || input.wasPressed('Space')) && p.dashCd <= 0 && p.dashT <= 0) {
@@ -302,18 +312,21 @@ export class World {
       });
     }
 
-    // Fire toward the mouse while it is held.
+    // Fire toward the mouse while it is held. With SCATTER live, each shot is a
+    // three-bolt fan; with OVERDRIVE, the fan (or the single bolt) comes faster.
     p.fireT -= dt;
     const interval = p.overdriveT > 0 ? PICKUPS.overdrive.fireInterval : PLAYER.fireInterval;
     if (input.mouse.down && p.fireT <= 0) {
       p.fireT = interval;
-      const spread = range(this.rng, -0.035, 0.035);
-      const a = p.angle + spread;
-      this.bullets.push({
-        x: p.x + Math.cos(p.angle) * 18, y: p.y + Math.sin(p.angle) * 18,
-        vx: Math.cos(a) * PLAYER.bulletSpeed, vy: Math.sin(a) * PLAYER.bulletSpeed,
-        life: BULLET.life, radius: BULLET.radius,
-      });
+      const fan = p.scatterT > 0 ? [-PICKUPS.scatter.spread, 0, PICKUPS.scatter.spread] : [0];
+      for (const off of fan) {
+        const a = p.angle + off + range(this.rng, -0.03, 0.03);
+        this.bullets.push({
+          x: p.x + Math.cos(p.angle) * 18, y: p.y + Math.sin(p.angle) * 18,
+          vx: Math.cos(a) * PLAYER.bulletSpeed, vy: Math.sin(a) * PLAYER.bulletSpeed,
+          life: BULLET.life, radius: BULLET.radius,
+        });
+      }
       this._burst(p.x + Math.cos(p.angle) * 20, p.y + Math.sin(p.angle) * 20, '#a8fff0', 1, 60, 0.12, 2.4);
       if (sound) sound.shoot();
     }
@@ -327,6 +340,7 @@ export class World {
       const toPlayer = Math.atan2(p.y - e.y, p.x - e.x);
 
       if (e.kind === 'boss') this._updateBoss(e, dt, toPlayer);
+      else if (e.kind === 'lancer') this._updateLancer(e, dt, toPlayer, sound);
       else {
         const spec = HUNTERS[e.kind];
         e.angle = angleLerp(e.angle, toPlayer, Math.min(1, spec.turn * dt));
@@ -367,8 +381,84 @@ export class World {
         const dmg = e.kind === 'boss' ? 18 : HUNTERS[e.kind].damage;
         this._hurtPlayer(dmg, sound);
         if (e.kind === 'mite') this._killEnemy(e, sound);
+        if (e.kind === 'lancer' && e.state === 'charge') {
+          e.state = 'recover';
+          e.stateT = HUNTERS.lancer.recoverTime;
+        }
       }
     }
+  }
+
+  // The lancer's charge, in four beats. It stalks at mid-range until its timer runs
+  // out, telegraphs — drifting slow while its aim settles on the player, so a quick
+  // sideways dash beats it — then charges in a dead straight line, and drifts spent
+  // while it recovers. Contact hurts like any hunter; a charge that misses is a gift.
+  _updateLancer(e, dt, toPlayer, sound) {
+    const spec = HUNTERS.lancer;
+    const p = this.player;
+    e.stateT -= dt;
+
+    if (e.state === 'stalk') {
+      e.angle = angleLerp(e.angle, toPlayer, Math.min(1, spec.turn * dt));
+      const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+      // Close in until it holds its preferred range, then circle slowly.
+      const radial = d > spec.stalkRange * 0.55 ? 1 : d < 170 ? -0.4 : 0.15;
+      const mx = Math.cos(e.angle) * radial + -Math.sin(e.angle) * 0.35;
+      const my = Math.sin(e.angle) * radial + Math.cos(e.angle) * 0.35;
+      e.vx += (mx * spec.speed - e.vx) * Math.min(1, 2.6 * dt);
+      e.vy += (my * spec.speed - e.vy) * Math.min(1, 2.6 * dt);
+      if (e.stateT <= 0 && p.alive && d < spec.stalkRange) {
+        e.state = 'telegraph';
+        e.stateT = spec.telegraphTime;
+        e.aimAngle = toPlayer;
+        if (sound) sound.lancerWarn();
+      }
+    } else if (e.state === 'telegraph') {
+      // Aim tracks the player early, then locks: the last stretch is committed.
+      if (e.stateT > 0.22) e.aimAngle = angleLerp(e.aimAngle, toPlayer, Math.min(1, 5 * dt));
+      e.angle = e.aimAngle;
+      e.vx *= Math.exp(-6 * dt);
+      e.vy *= Math.exp(-6 * dt);
+      if (e.stateT <= 0) {
+        e.state = 'charge';
+        e.stateT = spec.chargeTime;
+        e.chargeDx = Math.cos(e.aimAngle);
+        e.chargeDy = Math.sin(e.aimAngle);
+        if (sound) sound.lancerCharge();
+      }
+    } else if (e.state === 'charge') {
+      e.vx = e.chargeDx * spec.chargeSpeed;
+      e.vy = e.chargeDy * spec.chargeSpeed;
+      e.angle = e.aimAngle;
+      this.particles.push({
+        x: e.x - e.chargeDx * 14, y: e.y - e.chargeDy * 14,
+        vx: -e.chargeDx * 90 + range(this.rng, -30, 30), vy: -e.chargeDy * 90 + range(this.rng, -30, 30),
+        life: 0.28, maxLife: 0.28, size: 4, color: '#b6ff5e', drag: 2,
+      });
+      if (e.stateT <= 0) {
+        e.state = 'recover';
+        e.stateT = spec.recoverTime;
+      }
+    } else { // recover
+      e.vx *= Math.exp(-3.2 * dt);
+      e.vy *= Math.exp(-3.2 * dt);
+      e.angle = angleLerp(e.angle, toPlayer, Math.min(1, 1.6 * dt));
+      if (e.stateT <= 0) {
+        e.state = 'stalk';
+        e.stateT = range(this.rng, 0.7, 1.6);
+      }
+    }
+
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    // A charge that hits the arena wall ends spent against it.
+    if (e.state === 'charge' && (e.x < e.radius || e.x > FIELD.width - e.radius || e.y < e.radius || e.y > FIELD.height - e.radius)) {
+      e.state = 'recover';
+      e.stateT = spec.recoverTime;
+      this._burst(e.x, e.y, '#b6ff5e', 8, 200, 0.35, 3);
+    }
+    e.x = Math.max(e.radius, Math.min(FIELD.width - e.radius, e.x));
+    e.y = Math.max(e.radius, Math.min(FIELD.height - e.radius, e.y));
   }
 
   _updateBoss(e, dt, toPlayer) {
@@ -388,10 +478,30 @@ export class World {
 
     const enraged = e.hp < e.maxHp * 0.3;
     const rate = enraged ? 0.68 : 1;
+    const spiralling = e.hp < e.maxHp * BOSS.spiralBelow;
+
+    // Second pattern: twin spiral arms sweeping out of the Sun. While they turn, the
+    // radial bursts slow to half time, so the arena stays survivable — the gaps in
+    // the spiral are the way through.
+    if (spiralling) {
+      e.spiralT -= dt;
+      if (e.spiralT <= 0) {
+        e.spiralT = BOSS.spiralTick;
+        e.spiralAngle += BOSS.spiralStep;
+        for (const arm of [0, Math.PI]) {
+          const a = e.spiralAngle + arm;
+          this.ebullets.push({
+            x: e.x + Math.cos(a) * e.radius * 0.7, y: e.y + Math.sin(a) * e.radius * 0.7,
+            vx: Math.cos(a) * ENEMY_BULLET.speed * 0.92, vy: Math.sin(a) * ENEMY_BULLET.speed * 0.92,
+            life: ENEMY_BULLET.life, radius: ENEMY_BULLET.radius,
+          });
+        }
+      }
+    }
 
     e.fireT -= dt;
     if (e.fireT <= 0) {
-      e.fireT = BOSS.radialInterval * rate;
+      e.fireT = BOSS.radialInterval * rate * (spiralling ? 1.9 : 1);
       const off = this.rng() * TAU;
       for (let i = 0; i < BOSS.radialCount; i++) {
         const a = off + (i / BOSS.radialCount) * TAU;
@@ -483,8 +593,12 @@ export class World {
           p.overdriveT = PICKUPS.overdrive.duration;
           this._text(p.x, p.y - 26, 'OVERDRIVE', '#6dc4ff');
           if (sound) sound.powerup();
+        } else if (pk.kind === 'scatter') {
+          p.scatterT = PICKUPS.scatter.duration;
+          this._text(p.x, p.y - 26, 'SCATTER GUN', '#ff8ae2');
+          if (sound) sound.powerup();
         }
-        this._burst(pk.x, pk.y, pk.kind === 'core' ? '#ffe066' : pk.kind === 'repair' ? '#6dffa8' : '#6dc4ff', 8, 190, 0.35, 2.6);
+        this._burst(pk.x, pk.y, pk.kind === 'core' ? '#ffe066' : pk.kind === 'repair' ? '#6dffa8' : pk.kind === 'scatter' ? '#ff8ae2' : '#6dc4ff', 8, 190, 0.35, 2.6);
       }
     }
     this.pickups = this.pickups.filter((pk) => !pk.taken && pk.age < PICKUPS[pk.kind].life);
